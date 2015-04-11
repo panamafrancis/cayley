@@ -18,12 +18,14 @@ package gaedatastore
 
 import (
 	"fmt"
+
 	"github.com/google/cayley/graph"
 	"github.com/google/cayley/graph/iterator"
 	"github.com/google/cayley/quad"
 
-	"appengine/datastore"
 	"github.com/barakmich/glog"
+
+	"appengine/datastore"
 )
 
 type Iterator struct {
@@ -44,7 +46,7 @@ type Iterator struct {
 }
 
 var (
-	bufferSize = 50
+	bufferSize = 100
 )
 
 func NewIterator(qs *QuadStore, k string, d quad.Direction, val graph.Value) *Iterator {
@@ -68,8 +70,11 @@ func NewIterator(qs *QuadStore, k string, d quad.Direction, val graph.Value) *It
 
 	// The number of references to this node is held in the nodes entity
 	key := qs.createKeyFromToken(t)
-	foundNode := new(NodeEntry)
-	err := datastore.Get(qs.context, key, foundNode)
+	foundNode := &NodeEntry{
+		Id:    key.StringID(),
+		_kind: key.Kind(),
+	}
+	err := qs.db.Get(foundNode)
 	if err != nil && err != datastore.ErrNoSuchEntity {
 		glog.Errorf("Error: %v", err)
 		return &Iterator{done: true}
@@ -224,12 +229,22 @@ func (it *Iterator) Next() bool {
 	if it.done {
 		return false
 	}
+	cacheKey := it.kind + "=" + it.dir.String() + "=" + it.name + "=" + it.last
+	if c, ok := cache[cacheKey]; ok {
+		it.offset = 0
+		it.buffer = c.buffer
+		it.last = c.last
+		it.done = c.done
+		it.result = &Token{Kind: it.kind, Hash: c.buffer[it.offset]}
+		return true
+	}
+
 	// Reset buffer and offset
 	it.offset = 0
 	it.buffer = make([]string, 0, bufferSize)
 	// Create query
 	// TODO (panamafrancis) Keys only query?
-	q := datastore.NewQuery(it.kind).Limit(bufferSize)
+	q := datastore.NewQuery(it.kind)
 	if !it.isAll {
 		// Filter on the direction {subject,objekt...}
 		q = q.Filter(it.dir.String()+" =", it.name)
@@ -239,9 +254,9 @@ func (it *Iterator) Next() bool {
 	if err == nil {
 		q = q.Start(cursor)
 	}
-	// Buffer the keys of the next 50 matches
-	t := q.Run(it.qs.context)
-	for {
+	// Buffer the keys of the next 100 matches
+	t := it.qs.db.Run(q)
+	for i := 0; i < bufferSize; i++ {
 		// Quirk of the datastore, you cannot pass a nil value to to Next()
 		// even if you just want the keys
 		var k *datastore.Key
@@ -273,16 +288,28 @@ func (it *Iterator) Next() bool {
 			it.buffer = append(it.buffer, k.StringID())
 		}
 	}
-	// Save cursor position
-	cursor, err = t.Cursor()
-	if err == nil {
-		it.last = cursor.String()
-	}
 	// Protect against bad queries
 	if it.done && len(it.buffer) == 0 {
 		glog.Warningf("Query did not return any results")
 		return false
 	}
+
+	// Save cursor position
+	cursor, err = t.Cursor()
+	if err == nil {
+		it.last = cursor.String()
+	}
+
+	// save the buffer in an instance cache
+	if cache == nil {
+		cache = make(map[string]Cache)
+	}
+	cache[cacheKey] = Cache{
+		buffer: it.buffer,
+		last:   it.last,
+		done:   it.done,
+	}
+
 	// First result
 	it.result = &Token{Kind: it.kind, Hash: it.buffer[it.offset]}
 	return true

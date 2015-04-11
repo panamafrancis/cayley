@@ -25,6 +25,7 @@ install:
   - go get gopkg.in/mgo.v2
   - go get gopkg.in/mgo.v2/bson
   - go get code.google.com/p/go-uuid/uuid
+  - go get github.com/mjibson/goon
 
   # Google App Engine dependencies
   - cd ..
